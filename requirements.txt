@@ -1,0 +1,5 @@
+pybit
+pandas
+numpy
+pytz
+aiohttp
