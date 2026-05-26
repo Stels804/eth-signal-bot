@@ -214,7 +214,6 @@ class EthSignalBot:
 
         self.ws_trade: Optional[WebSocket] = None
         self.ws_orderbook: Optional[WebSocket] = None
-        self.ws_liquidations: Optional[WebSocket] = None
 
         self.last_rest_time: float = 0
         self.last_hourly: int = 0
@@ -882,12 +881,6 @@ class EthSignalBot:
         except Exception as e:
             logger.error(f"Orderbook handler: {e}")
 
-    def _handle_liquidations(self, message: Dict) -> None:
-        try:
-            if "data" in message:
-                logger.debug(f"Liquidation: {message['data']}")
-        except Exception as e:
-            logger.error(f"Liquidations handler: {e}")
 
     def _handle_kline(self, message: Dict) -> None:
         """Обработчик kline для правильного ATR (High/Low/Close)"""
@@ -910,8 +903,6 @@ class EthSignalBot:
             self.ws_orderbook = WebSocket(testnet=False, channel_type="public")
             self.ws_orderbook.orderbook_stream(symbol="ETHUSDT", depth=10, callback=self._handle_orderbook)
 
-            
-            
 
             # Kline для правильного ATR
             self.ws_kline = WebSocket(testnet=False, channel_type="public")
