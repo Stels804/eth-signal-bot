@@ -74,6 +74,7 @@ class EthSignalBot:
         self.last_update_id = 0
         self.startup_sent = False
         self.running = True
+        self.trade_logged = False  # флаг: логировали ли уже формат
 
     def get_local_time(self) -> datetime:
         return datetime.now(pytz.timezone(TZ_LOCAL))
@@ -200,6 +201,17 @@ class EthSignalBot:
             logger.error(f"Funding fetch error: {e}")
         return 0.0
 
+    async def fetch_current_price(self) -> float:
+        try:
+            response = self.session.get_tickers(category="linear", symbol="ETHUSDT")
+            if response and response.get("retCode") == 0:
+                tickers = response.get("result", {}).get("list", [])
+                if tickers:
+                    return float(tickers[0].get("lastPrice", 0))
+        except Exception as e:
+            logger.error(f"Price fetch error: {e}")
+        return 0.0
+
     async def update_rest_data(self) -> None:
         oi = await self.fetch_open_interest()
         if oi > 0:
@@ -211,6 +223,11 @@ class EthSignalBot:
         fr = await self.fetch_funding_rate()
         if fr != 0:
             self.funding_rate = fr
+        # Резервное обновление цены через REST
+        price = await self.fetch_current_price()
+        if price > 0:
+            self.current_price = price
+            logger.info(f"Цена обновлена через REST: {price:.2f}")
 
     async def ws_trade_handler(self):
         url = "wss://stream.bybit.com/v5/public/linear"
@@ -225,12 +242,23 @@ class EthSignalBot:
                             data = json.loads(msg)
                             if "data" in data and data.get("topic") == "publicTrade.ETHUSDT":
                                 for trade in data.get("data", []):
-                                    self.trades.append({
-                                        'price': float(trade['price']),
-                                        'size': float(trade['size']),
-                                        'side': trade['side']
-                                    })
-                                    self.current_price = float(trade['price'])
+                                    # Логируем формат один раз для диагностики
+                                    if not self.trade_logged:
+                                        logger.info(f"Trade raw sample: {trade}")
+                                        self.trade_logged = True
+                                    try:
+                                        price = float(trade.get('p') or trade.get('price', 0))
+                                        size = float(trade.get('v') or trade.get('size', 0))
+                                        side = trade.get('S') or trade.get('side', '')
+                                        if price > 0:
+                                            self.trades.append({
+                                                'price': price,
+                                                'size': size,
+                                                'side': side
+                                            })
+                                            self.current_price = price
+                                    except Exception as e:
+                                        logger.error(f"Trade parse error: {e}, raw: {trade}")
                         except asyncio.TimeoutError:
                             continue
                         except websockets.exceptions.ConnectionClosed:
