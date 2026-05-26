@@ -18,7 +18,6 @@ from typing import Optional, Tuple
 import pytz
 import websockets
 import aiohttp
-from pybit.unified_trading import HTTP
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -42,6 +41,12 @@ FUNDING_SHORT = 0.00015
 CVD_CONSECUTIVE = 3
 OI_DROP_THRESHOLD = -0.05
 
+BYBIT_BASE = "https://api.bybit.com"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; trading-bot/1.0)",
+    "Accept": "application/json"
+}
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s: %(message)s",
@@ -52,7 +57,6 @@ logger = logging.getLogger(__name__)
 
 class EthSignalBot:
     def __init__(self):
-        self.session = HTTP(testnet=False)
         self.trades = deque(maxlen=1000)
         self.cvd_history = deque(maxlen=100)
         self.cvd_down_count = 0
@@ -74,7 +78,7 @@ class EthSignalBot:
         self.last_update_id = 0
         self.startup_sent = False
         self.running = True
-        self.trade_logged = False  # флаг: логировали ли уже формат
+        self.trade_logged = False
 
     def get_local_time(self) -> datetime:
         return datetime.now(pytz.timezone(TZ_LOCAL))
@@ -90,7 +94,7 @@ class EthSignalBot:
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=10) as resp:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         logger.error(f"Telegram error: {await resp.text()}")
         except Exception as e:
@@ -101,7 +105,7 @@ class EthSignalBot:
         params = {"timeout": 1, "offset": self.last_update_id + 1}
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=5) as resp:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status != 200:
                         return
                     data = await resp.json()
@@ -179,40 +183,49 @@ class EthSignalBot:
         )
         await self.send_telegram(message)
 
-    async def fetch_open_interest(self) -> float:
+    async def fetch_ticker(self) -> dict:
+        url = f"{BYBIT_BASE}/v5/market/tickers"
+        params = {"category": "linear", "symbol": "ETHUSDT"}
         try:
-            response = self.session.get_open_interest(category="linear", symbol="ETHUSDT", interval="5min")
-            if response and response.get("retCode") == 0:
-                oi_list = response.get("result", {}).get("list", [])
-                if oi_list:
-                    return float(oi_list[0].get("openInterest", 0))
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("retCode") == 0:
+                            tickers = data.get("result", {}).get("list", [])
+                            if tickers:
+                                return tickers[0]
+        except Exception as e:
+            logger.error(f"Ticker fetch error: {e}")
+        return {}
+
+    async def fetch_open_interest(self) -> float:
+        url = f"{BYBIT_BASE}/v5/market/open-interest"
+        params = {"category": "linear", "symbol": "ETHUSDT", "intervalTime": "5min", "limit": 3}
+        try:
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("retCode") == 0:
+                            oi_list = data.get("result", {}).get("list", [])
+                            if oi_list:
+                                return float(oi_list[0].get("openInterest", 0))
         except Exception as e:
             logger.error(f"OI fetch error: {e}")
         return 0.0
 
-    async def fetch_funding_rate(self) -> float:
-        try:
-            response = self.session.get_tickers(category="linear", symbol="ETHUSDT")
-            if response and response.get("retCode") == 0:
-                tickers = response.get("result", {}).get("list", [])
-                if tickers:
-                    return float(tickers[0].get("fundingRate", 0))
-        except Exception as e:
-            logger.error(f"Funding fetch error: {e}")
-        return 0.0
-
-    async def fetch_current_price(self) -> float:
-        try:
-            response = self.session.get_tickers(category="linear", symbol="ETHUSDT")
-            if response and response.get("retCode") == 0:
-                tickers = response.get("result", {}).get("list", [])
-                if tickers:
-                    return float(tickers[0].get("lastPrice", 0))
-        except Exception as e:
-            logger.error(f"Price fetch error: {e}")
-        return 0.0
-
     async def update_rest_data(self) -> None:
+        ticker = await self.fetch_ticker()
+        if ticker:
+            price = float(ticker.get("lastPrice", 0))
+            if price > 0:
+                self.current_price = price
+                logger.info(f"Цена: {price:.2f}")
+            fr = float(ticker.get("fundingRate", 0))
+            if fr != 0:
+                self.funding_rate = fr
+
         oi = await self.fetch_open_interest()
         if oi > 0:
             self.oi_history.append(oi)
@@ -220,14 +233,6 @@ class EthSignalBot:
                 prev_oi = self.oi_history[-3]
                 if prev_oi > 0:
                     self.oi_drop_detected = (oi - prev_oi) / prev_oi < OI_DROP_THRESHOLD
-        fr = await self.fetch_funding_rate()
-        if fr != 0:
-            self.funding_rate = fr
-        # Резервное обновление цены через REST
-        price = await self.fetch_current_price()
-        if price > 0:
-            self.current_price = price
-            logger.info(f"Цена обновлена через REST: {price:.2f}")
 
     async def ws_trade_handler(self):
         url = "wss://stream.bybit.com/v5/public/linear"
@@ -242,7 +247,6 @@ class EthSignalBot:
                             data = json.loads(msg)
                             if "data" in data and data.get("topic") == "publicTrade.ETHUSDT":
                                 for trade in data.get("data", []):
-                                    # Логируем формат один раз для диагностики
                                     if not self.trade_logged:
                                         logger.info(f"Trade raw sample: {trade}")
                                         self.trade_logged = True
