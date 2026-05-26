@@ -910,8 +910,8 @@ class EthSignalBot:
             self.ws_orderbook = WebSocket(testnet=False, channel_type="public")
             self.ws_orderbook.orderbook_stream(symbol="ETHUSDT", depth=10, callback=self._handle_orderbook)
 
-            self.ws_liquidations = WebSocket(testnet=False, channel_type="public")
-            self.ws_liquidations.liquidation_stream(symbol="ETHUSDT", callback=self._handle_liquidations)
+            
+            
 
             # Kline для правильного ATR
             self.ws_kline = WebSocket(testnet=False, channel_type="public")
